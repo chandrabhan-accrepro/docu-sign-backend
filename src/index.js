@@ -8,6 +8,12 @@ const bodyParser = require("body-parser");
 const fs = require("fs");
 const session = require("express-session");
 const axios = require("axios");
+const moment = require("moment");
+const multer = require("multer");
+
+const crypto = require("crypto");
+
+// !used the crypto module, which is a built-in Node.js module, to create an HMAC (Hash-based Message Authentication Code) using the SHA-256 algorithm.
 
 const port = process.env.PORT || 8000;
 const app = express();
@@ -39,6 +45,7 @@ app.post("/form", async (request, response) => {
       request.body.name,
       request.body.subject,
       request.body.emailBody,
+      request.body.fileNameForSign,
       envelopesApi
     );
     console.log("envelope results ", results);
@@ -76,15 +83,16 @@ const createEnvelope = async (
   signerName,
   subject,
   emailBody,
+  fileNameForSign,
   envelopesApi
 ) => {
   try {
     // Read the document file and convert it to base64
     const documentContent = fs.readFileSync(
-      path.join(__dirname, "Docu-sign-implementatio.pdf"),
+      path.join(__dirname, `documents/${fileNameForSign}`),
       "base64"
     );
-
+    console.log("Document fileName: ", fileNameForSign);
     // console.log("Signer Data", signerEmail, signerName, documentContent);
     // Defined envelope definition with the actual document content
     const envelopeDefinition = {
@@ -96,7 +104,7 @@ const createEnvelope = async (
       documents: [
         {
           documentBase64: documentContent,
-          name: "Document.pdf",
+          name: fileNameForSign,
           documentId: "1",
         },
       ],
@@ -185,6 +193,9 @@ app.post("/getDoc", async (req, res) => {
     const envelopeID = req.query.envelopeId
       ? req.query.envelopeId
       : req.body.envelopeId;
+    const documentName = req.body.docName;
+    const parts = documentName.split(".");
+    const withoutExtensionDocName = parts[0];
     await checkToken(req);
     let dsApiClient = new docusign.ApiClient();
     dsApiClient.setBasePath(process.env.BASE_PATH);
@@ -215,8 +226,9 @@ app.post("/getDoc", async (req, res) => {
         // Check if the response status is 200 (OK)
         if (docuResponse.status === 200) {
           // Define the file path and name
-          const filename = `${envelopeID}_${process.env.ACCOUNT_ID}.pdf`;
-          const tempFile = path.resolve(__dirname, filename);
+          const filename = `${withoutExtensionDocName}_${envelopeID}.pdf`;
+          const filePath = `${__dirname}/signed-docs/`;
+          const tempFile = path.resolve(filePath, filename);
 
           // Pipe the response stream to a file
           docuResponse.data.pipe(fs.createWriteStream(tempFile));
@@ -295,6 +307,180 @@ app.get("/", async (request, response) => {
 app.get("/success", (request, response) => {
   response.send("Successfully Completed Signing Process!");
 });
+
+// !for getting real time notifications
+
+app.get("/statusenveloper", async (req, res) => {
+  try {
+    await checkToken(req);
+    let dsApiClient = new docusign.ApiClient();
+    dsApiClient.setBasePath(process.env.BASE_PATH);
+    dsApiClient.addDefaultHeader(
+      "Authorization",
+      "Bearer " + req.session.access_token
+    );
+    let envelopesApi = new docusign.EnvelopesApi(dsApiClient);
+    let results = null;
+
+    // List the envelopes
+    // The Envelopes::listStatusChanges method has many options
+    // See https://developers.docusign.com/esign-rest-api/reference/Envelopes/Envelopes/listStatusChanges
+
+    let options = { fromDate: moment().subtract(30, "days").format() };
+
+    // Exceptions will be caught by the calling function
+    results = await envelopesApi.listStatusChanges(
+      process.env.ACCOUNT_ID,
+      options
+    );
+    console.log("Listing status changes: ", results);
+    res.status(200).json({ results });
+  } catch (error) {
+    console.log("Error: ", error.message);
+    res.status(500).json({ error });
+  }
+});
+
+app.get("/api/v1/getPdfs", (req, res) => {
+  try {
+    const pdfFolder = path.join(__dirname, "signed-docs"); // Replace with your folder path
+
+    // Read all files in the PDF folder
+    fs.readdir(pdfFolder, (err, files) => {
+      if (err) {
+        // Handle any error that occurs while reading the folder
+        console.error(err.message);
+        res.status(500).send("Internal Server Error");
+      } else {
+        // Filter only PDF files
+        const pdfFiles = files.filter((file) =>
+          file.toLowerCase().endsWith(".pdf")
+        );
+
+        // Set the Content-Type header to indicate that it's a PDF file
+        res.setHeader("Content-Type", "application/pdf");
+        // console.log(pdfFiles);
+        // Send all PDF files as a response
+        const allLinks = [];
+        pdfFiles.forEach((filename) => {
+          const filePath = path.join(pdfFolder, filename);
+          // console.log(filePath);
+          allLinks.push(
+            filename
+            // `<a href="http://localhost:8000/api/v1/getPdf/${filename}">${filename}</a><br>`
+          );
+        });
+        console.log(allLinks);
+        res.status(200).json({ result: allLinks });
+      }
+    });
+  } catch (error) {
+    console.log("error: ", error.message);
+    res.status(500).json({ error: error });
+  }
+});
+
+app.get("/api/v1/getPdf/:filename", (req, res) => {
+  const pdfFolder = path.join(__dirname, "signed-docs");
+  const { filename } = req.params;
+  const filePath = path.join(pdfFolder, filename);
+  console.log(pdfFolder);
+  // Check if the file exists
+  if (fs.existsSync(filePath)) {
+    // Set the Content-Type header to indicate that it's a PDF file
+    res.setHeader("Content-Type", "application/pdf");
+
+    // Send the PDF file as a response
+    console.log(filePath);
+    res.sendFile(filePath);
+  } else {
+    // Handle the case where the file does not exist
+    res.status(404).send("File not found");
+  }
+});
+app.get("/api/getDocuments", (req, res) => {
+  try {
+    const pdfFolder = path.join(__dirname, "documents"); // Replace with your folder path
+
+    // Read all files in the PDF folder
+    fs.readdir(pdfFolder, (err, files) => {
+      if (err) {
+        // Handle any error that occurs while reading the folder
+        console.error(err.message);
+        res.status(500).send("Internal Server Error");
+      } else {
+        // Filter only PDF files
+        const pdfFiles = files.filter((file) =>
+          file.toLowerCase().endsWith(".pdf")
+        );
+
+        // Set the Content-Type header to indicate that it's a PDF file
+        res.setHeader("Content-Type", "application/pdf");
+        // console.log(pdfFiles);
+        // Send all PDF files as a response
+        const allLinks = [];
+        pdfFiles.forEach((filename) => {
+          const filePath = path.join(pdfFolder, filename);
+          // console.log(filePath);
+          allLinks.push(
+            filename
+            // `<a href="http://localhost:8000/api/v1/getPdf/${filename}">${filename}</a><br>`
+          );
+        });
+        console.log(allLinks);
+        res.status(200).json({ result: allLinks });
+      }
+    });
+  } catch (error) {
+    console.log("error: ", error.message);
+    res.status(500).json({ error: error });
+  }
+});
+app.get("/api/getDocuments/:filename", (req, res) => {
+  const pdfFolder = path.join(__dirname, "documents");
+  const { filename } = req.params;
+  const filePath = path.join(pdfFolder, filename);
+  console.log(pdfFolder);
+  // Check if the file exists
+  if (fs.existsSync(filePath)) {
+    // Set the Content-Type header to indicate that it's a PDF file
+    res.setHeader("Content-Type", "application/pdf");
+
+    // Send the PDF file as a response
+    console.log(filePath);
+    res.sendFile(filePath);
+  } else {
+    // Handle the case where the file does not exist
+    res.status(404).send("File not found");
+  }
+});
+
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, path.join(__dirname, "documents/"));
+  },
+  filename: function (req, file, cb) {
+    cb(null, file.originalname);
+  },
+});
+const upload = multer({ storage: storage });
+
+app.post("/uploadnewfile", upload.single("file"), (req, res) => {
+  res.status(200).json({ message: "File uploaded successfully" });
+});
+
+//! getting the single pdf------------------------------
+// app.get("/api/v1/getPdf", function (req, res) {
+//   const file = path.join(
+//     __dirname,
+//     "signed-docs/Docu-sign-implementatio_2376c015-3f0f-486d-89bf-f5c0b3987163.pdf"
+//   );
+//   // Set the Content-Type header to indicate that it's a PDF file
+//   res.setHeader("Content-Type", "application/pdf");
+
+//   // Send the PDF file as a response
+//   res.sendFile(file);
+// });
 
 app.listen(port, (err) => {
   console.log("successfully listening on port " + port);
